@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Logs & temp
+*.log
+tmp/
+cache/
+
+# Isaac/Omniverse common
+*.usd~
+*.usda~
+*.tmp
+omniverse_cache/
+_omniverse/
+
+# ROS / build artifacts
+build/
+install/
+log/
