@@ -35,3 +35,7 @@ isaac_diff_drive_nav/
 ├── README.md
 └── requirements.txt
 
+# RUN
+/home/saman-aboutorab/isaacsim/python.sh src/main.py
+
+
