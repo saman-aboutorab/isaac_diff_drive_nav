@@ -26,3 +26,8 @@ _omniverse/
 build/
 install/
 log/
+
+# Isaac Sim / Omniverse generated assets
+*.usd
+*.usda
+*.usdc
