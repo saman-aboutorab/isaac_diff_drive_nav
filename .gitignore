@@ -37,3 +37,9 @@ isaac/robots/Collected_nova_carter/
 *.usd
 *.usda
 *.usdc
+
+# Omniverse / Isaac generated assets
+isaac/robots/Collected_nova_carter/
+*.usd
+*.usda
+*.usdc
