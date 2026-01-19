@@ -1,175 +1,168 @@
 import os
 import numpy as np
-
 from omni.isaac.kit import SimulationApp
 
-# --- 1) Start Isaac Sim UI ---
 simulation_app = SimulationApp({"headless": False})
-
-# import Isaac/Omni modules
+import omni
+import omni.replicator.core as rep
 from omni.isaac.core import World
 from omni.isaac.core.utils.stage import open_stage
-from omni.isaac.core.utils.prims import create_prim
-from omni.isaac.core.utils.nucleus import get_assets_root_path
-from omni.isaac.core.utils.stage import add_reference_to_stage
-from omni.isaac.core.prims import RigidPrim
 from omni.isaac.core.articulations import Articulation
 from omni.isaac.core.utils.types import ArticulationAction
-from omni.isaac.core.utils.prims import get_prim_at_path
 from omni.isaac.core.utils.prims import is_prim_path_valid
-from omni.isaac.core.utils.prims import create_prim
+from omni.isaac.sensor import _sensor
+from omni.isaac.range_sensor import RangeSensorCreateLidar
 from omni.isaac.core.utils.stage import get_current_stage
 from pxr import Gf, UsdGeom
-import omni.kit.app
-### --- inputs --- ###
+from omni.isaac.range_sensor import _range_sensor
+from omni.isaac.core.utils.prims import create_prim, delete_prim
+from isaacsim.sensors.rtx import LidarRtx
 
-# Speed
-v = 0.1 # m/s
-w = 0.0 # rad/s
+# -------------------
+CANDIDATE_MODULES = [
+    "omni.sensors.nv.lidar",
+    "omni.sensors.nv.lidar._lidar",
+    "isaacsim.sensors.rtx",
+    "isaacsim.sensors.rtx._lidar",
+    "omni.isaac.range_sensor",
+    "omni.isaac.range_sensor._range_sensor",
+]
 
-# Robot parameters (meters)
+def read_ranges_any(rs_iface, path: str):
+    # common method names across builds
+    for m in ["get_linear_depth_data", "get_depth_data", "get_ranges", "get_lidar_data"]:
+        if hasattr(rs_iface, m):
+            try:
+                return m, getattr(rs_iface, m)(path)
+            except Exception:
+                pass
+    return None, None
+# -------------------
+# Inputs
+# -------------------
+v = 0.2
+w = 0.0
 WHEEL_RADIUS = 0.05
 WHEEL_BASE = 0.30
 
-# --- Helper functions
-class Log:
-    BLUE = "\033[94m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    BOLD = "\033[1m"
-    END = "\033[0m"
-
-def log_info(msg):
-    print(f"{Log.GREEN}[INFO] {msg}{Log.END}")
-
-def log_warn(msg):
-    print(f"{Log.YELLOW}[WARN] {msg}{Log.END}")
-
-def log_err(msg):
-    print(f"{Log.RED}[ERR] {msg}{Log.END}")
-
-def log_step(msg):
-    print(f"{Log.BLUE}{msg}{Log.END}")
-
-
-def v_w_to_wheels(v, w, wheel_radius, wheel_base):
-    w_left = (v - w * wheel_base / 2.0) / wheel_radius
-    w_right = (v + w * wheel_base / 2.0) / wheel_radius
-    return w_left, w_right
-
-# --- Point to saved world USD --- #
-# Change this if your world file has a different name/location:
 WORLD_USD = "/home/saman-aboutorab/projects/Robotics/isaac_diff_drive_nav/isaac/worlds/simple_obstacles_carter_lidar.usd"
+ROBOT_PRIM_PATH = "/World/nova_carter"
 
+ROBOT_PATH = "/World/nova_carter"
+LIDAR_PATH = f"{ROBOT_PATH}/lidar_2d"
+
+LIDAR_MOUNT_PATH = f"{ROBOT_PATH}/lidar_mount"
+LIDAR_SENSOR_PATH = f"{LIDAR_MOUNT_PATH}/lidar_2d"
+
+def v_w_to_wheels(v, w, r, L):
+    wl = (v - w * L / 2.0) / r
+    wr = (v + w * L / 2.0) / r
+    return wl, wr
+
+# -------------------
+# Load world
+# -------------------
 if not os.path.exists(WORLD_USD):
-    raise FileNotFoundError(f"World USD not found: {WORLD_USD}")
+    raise FileNotFoundError(WORLD_USD)
 
-log_step(f"Loading world: {WORLD_USD}")
 open_stage(WORLD_USD)
-
-# --- Spawn Nova Carter --- #
-assets_root = get_assets_root_path()
-if assets_root is None:
-    # Fallback if nucleus path isn't configured; you can replace with your real asset root later
-    assets_root = "omniverse://localhost/NVIDIA/Assets/Isaac/5.0"
-    log_warn(f"[WARN] get_assets_root_path() returned None. Using fallback: {assets_root}")
-else:
-    log_info(f"Assets root: {assets_root}")
-
 simulation_app.update()
 
-# CARTER_USD = "/home/saman-aboutorab/projects/Robotics/isaac_diff_drive_nav/isaac/robots/NovaCarter/nova_carter.usd"
-# ROBOT_PRIM_PATH = "/World/NovaCarter"
-# log_info(f"Spawning Carter from: {CARTER_USD}")
-# create_prim(ROBOT_PRIM_PATH, "Xform")  # make sure prim path exists
-# add_reference_to_stage(usd_path=CARTER_USD, prim_path=ROBOT_PRIM_PATH)
-
-# --- Create a World and step simulation so we can see it
 world = World(stage_units_in_meters=1.0)
 world.reset()
 
-# --- Lidar --- #
+# -------------------
+# Wrap robot
+# -------------------
+if not is_prim_path_valid(ROBOT_PRIM_PATH):
+    raise RuntimeError(f"Robot not found at {ROBOT_PRIM_PATH}")
 
-LIDAR_PATH = "/World/nova_carter/rtx_lidar"
-
-# ranges = lidar_iface.get_linear_depth_data(LIDAR_PATH)
-# Create a transform prim for mounting
-# create_prim(LIDAR_PATH, "Xform")
-
-# Set pose
-stage = get_current_stage()
-xform = UsdGeom.Xformable(stage.GetPrimAtPath(LIDAR_PATH))
-xform.ClearXformOpOrder()
-xform.AddTranslateOp().Set(Gf.Vec3d(0.25, 0.0, 0.25))  # forward, left/right, up
-
-app = omni.kit.app.get_app()
-ext_mgr = app.get_extension_manager()
-
-# if not is_prim_path_valid(ROBOT_PATH):
-#     raise RuntimeError(f"Robot prim not found at {ROBOT_PATH}. Check the path in Stage.")
-
-# Create articulation interface
 carter = Articulation(prim_path=ROBOT_PRIM_PATH, name="nova_carter")
 world.scene.add(carter)
-log_step("Carter articulation initialized")
+
 world.reset()
 carter.initialize()
 
-# --- Get joint indices --- #
+# DOF names -> wheel indices
+dof_names = list(carter.dof_names) if hasattr(carter, "dof_names") else list(carter.get_dof_names())
+left_i = dof_names.index("joint_wheel_left")
+right_i = dof_names.index("joint_wheel_right")
 
-# DOF names
-dof_names = None
-if hasattr(carter, "dof_names"):
-    dof_names = list(carter.dof_names)
-elif hasattr(carter, "get_dof_names"):
-    dof_names = list(carter.get_dof_names())
-elif hasattr(carter, "_articulation_view") and hasattr(carter._articulation_view, "dof_names"):
-    dof_names = list(carter._articulation_view.dof_names)
+vel = np.zeros(len(dof_names), dtype=np.float32)
 
-if dof_names is None:
-    raise RuntimeError("Could not access DOF names from this Articulation object.")
+# -------------------
+# LiDAR
+# -------------------
 
-log_info("DOF names:")
-for i, n in enumerate(dof_names):
-    log_info(f"  {i}: {n}")
+# Create a mounting Xform under the robot
+stage = get_current_stage()
 
-# find wheel indices by name
-left_name = "joint_wheel_left"
-right_name = "joint_wheel_right"
+if not stage.GetPrimAtPath(LIDAR_MOUNT_PATH).IsValid():
+    create_prim(LIDAR_MOUNT_PATH, "Xform")
+    xform = UsdGeom.Xformable(stage.GetPrimAtPath(LIDAR_MOUNT_PATH))
+    xform.ClearXformOpOrder()
+    xform.AddTranslateOp().Set(Gf.Vec3d(0.25, 0.0, 0.25))  # front + up
+simulation_app.update()
 
-left_i = dof_names.index(left_name)
-right_i = dof_names.index(right_name)
+# RTX LiDAR uses an OmniLidar prim and Replicator-based annotators
+# Create sensor
+lidar = LidarRtx(
+    prim_path=LIDAR_SENSOR_PATH,
+    translation=np.array([0.0, 0.0, 0.0]),     # relative to mount
+    orientation=np.array([1.0, 0.0, 0.0, 0.0]), # (w,x,y,z)
+    config_file_name="Example_Rotary",
+)
+lidar.initialize()
 
-log_info(f"wheel DOF indices:, {left_i}, {right_i}")
+# IMPORTANT: play timeline before attaching/reading replicator annotators
+timeline = omni.timeline.get_timeline_interface()
+timeline.play()
+simulation_app.update()
 
-# apply velocity targets using a full array
-num_dof = len(dof_names)
-vel = np.zeros(num_dof, dtype=np.float32)
+# Attach an annotator. This one gives per-frame point cloud (fast to start with).
+lidar.attach_annotator("IsaacExtractRTXSensorPointCloudNoAccumulator")
 
-wl, wr = v_w_to_wheels(v, w, WHEEL_RADIUS, WHEEL_BASE)
+# Step a bit so the render product + annotator graph initializes
+for _ in range(30):
+    world.step(render=True)
 
-log_step(f"Driving forward using joints, {dof_names[left_i]}, {dof_names[right_i]}")
+print("\033[95m[LIDAR]\033[0m RTX lidar created at:", LIDAR_SENSOR_PATH)
 
+# -------------------
+# Run loop
+# -------------------
+try:
+    for step_i in range(11000):
+        frame = lidar.get_current_frame()
 
-# Constant Simple speed
-# FORWARD_RAD_S = 5.0
+        if step_i == 0:
+            print("\n[LIDAR] frame keys:", list(frame.keys()))
 
-# for _ in range(300):  # ~5 seconds
-#     vel[:] = 0.0
-#     vel[left_i] = FORWARD_RAD_S
-#     vel[right_i] = FORWARD_RAD_S
+        blob = frame.get("IsaacExtractRTXSensorPointCloudNoAccumulator", {})
+        pts = blob.get("data", None)
 
-#     carter.apply_action(ArticulationAction(joint_velocities=vel))
-#     world.step(render=True)
+        if pts is None or len(pts) == 0:
+            print("\033[91m[LIDAR]\033[0m no RTX point cloud yet      ", end="\r")
+        else:
+            pts = np.asarray(pts, dtype=np.float32)
+            d = np.linalg.norm(pts[:, :3], axis=1)
+            d = d[np.isfinite(d)]
+            if len(d) > 0:
+                print(f"\033[95m[LIDAR]\033[0m min={float(d.min()):.2f} m      ", end="\r")
 
-for _ in range(3000):  # ~5 seconds
-    vel[:] = 0.0
-    vel[left_i] = wl
-    vel[right_i] = wr
+        wl, wr = v_w_to_wheels(v, w, WHEEL_RADIUS, WHEEL_BASE)
+        vel[:] = 0.0
+        vel[left_i] = wl
+        vel[right_i] = wr
+        carter.apply_action(ArticulationAction(joint_velocities=vel))
+        world.step(render=True)
 
-    carter.apply_action(ArticulationAction(joint_velocities=vel))
-    world.step(render=True) 
-
-log_info("Running sim for a few seconds. Close the window to exit.")
+finally:
+    # Clean shutdown prevents syntheticdata/graph crashes
+    try:
+        timeline = omni.timeline.get_timeline_interface()
+        timeline.stop()
+    except Exception:
+        pass
+    simulation_app.close()
 
