@@ -23,6 +23,8 @@ from isaacsim.sensors.rtx import LidarRtx
 # ------------------------------------------------------------
 # Pretty, colored logs
 # ------------------------------------------------------------
+DEBUG_SECTORS = True  # set True temporarily when debugging
+
 class Log:
     RESET = "\033[0m"
     RED   = "\033[91m"
@@ -76,41 +78,147 @@ def to_xyz_points(pts) -> np.ndarray | None:
 # ------------------------------------------------------------
 DEG = math.pi / 180.0
 SECTORS = {
-    "L": (10 * DEG, 90 * DEG),
-    "C": (-10 * DEG, 10 * DEG),
-    "R": (-90 * DEG, -10 * DEG),
+    "L": (15 * DEG, 90 * DEG),
+    "C": (-20 * DEG, 20 * DEG),
+    "R": (-90 * DEG, -15 * DEG),
 }
 MIN_VALID_RANGE = 0.15
 MAX_VALID_RANGE = 8.0
 
-def sector_mins_from_pointcloud(pts_xyz: np.ndarray):
+def sector_mins_from_pointcloud(pts_xyz: np.ndarray, forward_axis="y"):
+    """
+    forward_axis: "x" or "y"
+    We assume the other horizontal axis is left/right.
+    """
     mins = {"L": float("inf"), "C": float("inf"), "R": float("inf")}
 
     if pts_xyz is None or len(pts_xyz) == 0:
         return mins
 
-    x = pts_xyz[:, 0]
-    y = pts_xyz[:, 1]
+    # --- choose axes ---
+    if forward_axis == "x":
+        f = pts_xyz[:, 0]  # forward
+        l = pts_xyz[:, 1]  # left
+    else:
+        f = pts_xyz[:, 1]  # forward (your case)
+        l = pts_xyz[:, 0]  # left
 
-    d = np.sqrt(x * x + y * y)
+    z = pts_xyz[:, 2]
 
-    # Front only + ignore self hits + ignore far noise
-    valid = (x > 0.05) & np.isfinite(d) & (d > MIN_VALID_RANGE) & (d < MAX_VALID_RANGE)
+    # --- 2D distance in the horizontal plane (forward-left plane) ---
+    d = np.sqrt(f*f + l*l)
+
+    # --- filter ---
+    # only points in front, reasonable range, and near sensor height (reduce floor/ceiling noise)
+    valid = (
+        (f > 0.05) &
+        np.isfinite(d) &
+        (d > MIN_VALID_RANGE) &
+        (d < MAX_VALID_RANGE) &
+        (z > -0.30) & (z < 0.70)          # <-- keep wall points; reduce floor/ceiling noise
+    )
     if not np.any(valid):
         return mins
 
-    x = x[valid]
-    y = y[valid]
+    if DEBUG_SECTORS:
+        kept = int(np.sum(valid))
+        total = int(len(d))
+        log(Log.GRAY, "FILTER", f"kept={kept}/{total} ({100*kept/max(total,1):.1f}%)")
+
+    f = f[valid]
+    l = l[valid]
     d = d[valid]
-    ang = np.arctan2(y, x)
+
+    # angle relative to forward axis
+    ang = np.arctan2(l, f)
 
     for k, (a0, a1) in SECTORS.items():
-        # (kept robust for wrap-around sectors; your current sectors do not wrap)
         m = (ang >= a0) & (ang <= a1) if a0 <= a1 else ((ang >= a0) | (ang <= a1))
         if np.any(m):
             mins[k] = float(d[m].min())
 
+    if DEBUG_SECTORS:
+        cnt = int(np.sum(m))
+        if cnt > 0:
+            log(Log.GRAY, "SECTOR_CNT", f"{k} count={cnt} min={float(d[m].min()):.2f}")
+
     return mins
+
+
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+def compute_cmd_from_sectors(mins, w_prev=0.0):
+    L, C, R = mins["L"], mins["C"], mins["R"]
+    L_ok, C_ok, R_ok = np.isfinite(L), np.isfinite(C), np.isfinite(R)
+
+    # if C missing, be conservative instead of assuming clear
+    Cm = C if C_ok else SLOW_DIST
+
+    # --- speed ---
+    if Cm <= STOP_DIST:
+        v_cmd = 0.0
+    elif Cm >= SLOW_DIST:
+        v_cmd = V_MAX
+    else:
+        alpha = (Cm - STOP_DIST) / (SLOW_DIST - STOP_DIST)
+        v_cmd = V_MIN + alpha * (V_MAX - V_MIN)
+
+    # --- turning ---
+    # Default straight
+    w_cmd = 0.0
+
+    # If something is within "slow zone", start steering away
+    if Cm <= SLOW_DIST:
+        if L_ok and R_ok:
+            # obstacle closer on left => turn right (negative)
+            w_cmd = -TURN_GAIN * (R - L)
+        elif R_ok and not L_ok:
+            # we only see right-side obstacles => turn LEFT
+            w_cmd = +0.7 * W_MAX
+        elif L_ok and not R_ok:
+            # we only see left-side obstacles => turn RIGHT
+            w_cmd = -0.7 * W_MAX
+        else:
+            w_cmd = 0.0
+
+        # stronger when very close
+        if Cm <= STOP_DIST:
+            w_cmd *= 1.5
+
+    # clamp + smooth
+    w_cmd = clamp(w_cmd, -W_MAX, W_MAX)
+    SMOOTH = 0.85
+    w_cmd = SMOOTH * w_prev + (1.0 - SMOOTH) * w_cmd
+
+    return float(v_cmd), float(w_cmd)
+
+def log_cmd_if_changed(v, w, v_prev, w_prev, mins):
+    dv = abs(v - v_prev)
+    dw = abs(w - w_prev)
+
+    C = mins["C"]
+    near = np.isfinite(C) and (C < SLOW_DIST)
+
+    # log if command changed meaningfully OR we are near something ahead
+    if dv > 0.03 or dw > 0.10 or near:
+        log(
+            Log.YELL if near else Log.GRAY,
+            "CMD",
+            f"v={v:.2f} w={w:.2f} | L={fmt(mins['L'])} C={fmt(mins['C'])} R={fmt(mins['R'])}"
+        )
+
+def log_cmd_state(v, w, mins, reason=""):
+    color = Log.GREEN
+    C = mins.get("C", float("inf"))
+    if np.isfinite(C) and C < STOP_DIST:
+        color = Log.RED
+    elif np.isfinite(C) and C < SLOW_DIST:
+        color = Log.YELL
+
+    log(color, "CMD",
+        f"{reason} v={v:.2f} w={w:.2f} | L={fmt(mins['L'])} C={fmt(mins['C'])} R={fmt(mins['R'])}"
+    )
 
 # ------------------------------------------------------------
 # Inputs / paths
@@ -131,6 +239,17 @@ ROBOT_PATH = "/World/nova_carter"
 LIDAR_MOUNT_PATH = f"{ROBOT_PATH}/lidar_mount"
 LIDAR_SENSOR_PATH = f"{LIDAR_MOUNT_PATH}/lidar_2d"
 
+# Reactive controller params
+
+V_MAX = 0.25          # m/s
+V_MIN = 0.05          # m/s (creep)
+W_MAX = 1.2           # rad/s (turn speed cap)
+
+STOP_DIST = 0.55      # if front closer than this -> strong avoid
+SLOW_DIST = 1.60      # start slowing down here
+
+TURN_GAIN = 1.0       # how strongly to turn away from obstacles
+CENTER_GAIN = 0.6     # gentle centering when clear
 # ------------------------------------------------------------
 # Load world
 # ------------------------------------------------------------
@@ -204,6 +323,7 @@ log(Log.MAG, "LIDAR", f"RTX lidar ready at {LIDAR_SENSOR_PATH}")
 # Main loop
 # ------------------------------------------------------------
 last_xyz = None   # keep last valid point cloud between reads (so motion continues smoothly)
+v_prev, w_prev = 0.0, 0.0
 
 try:
     step_i = 0
@@ -233,7 +353,14 @@ try:
                 if step_i == 0 or once_every(step_i, READ_EVERY * 30):
                     log(Log.CYAN, "LIDAR", f"raw pts ndim={arr.ndim}, shape={getattr(arr,'shape',None)}, size={arr.size}")
 
-            xyz = to_xyz_points(pts)
+            xyz = to_xyz_points(pts) # xyz shape: (n, 3)
+
+            if step_i == 0:
+                ang_x = np.degrees(np.arctan2(xyz[:,1], xyz[:,0]))  # assume forward=x
+                ang_y = np.degrees(np.arctan2(xyz[:,0], xyz[:,1]))  # assume forward=y
+                log(Log.CYAN, "AXIS", f"assume fwd=x angle range: {ang_x.min():.1f}..{ang_x.max():.1f}")
+                log(Log.CYAN, "AXIS", f"assume fwd=y angle range: {ang_y.min():.1f}..{ang_y.max():.1f}")
+
             if xyz is None or len(xyz) == 0:
                 # keep last_xyz; don't overwrite good data with empty frames
                 if step_i == 0:
@@ -260,10 +387,11 @@ try:
 
             # Occasional angle sanity logs
             if once_every(step_i, LOG_ANGLE_EVERY):
-                ang_deg = np.degrees(np.arctan2(xyz[:, 1], xyz[:, 0]))
+                ang_deg = np.degrees(np.arctan2(xyz[:, 0], xyz[:, 1]))
                 log(Log.GRAY, "LIDAR", f"angle deg: min={ang_deg.min():.1f}, max={ang_deg.max():.1f}")
 
-            mins = sector_mins_from_pointcloud(xyz)
+            mins = sector_mins_from_pointcloud(xyz, forward_axis="y")
+
             log(
                 Log.GREEN,
                 "SECTOR",
@@ -271,9 +399,42 @@ try:
                 end="\r"
             )
 
+
         # ----------------------------
         # Drive robot (constant v,w for now)
         # ----------------------------
+        v, w = compute_cmd_from_sectors(mins, w_prev=w_prev)
+        
+        log_cmd_if_changed(v, w, v_prev, w_prev, mins)
+        near = np.isfinite(mins["C"]) and mins["C"] < SLOW_DIST
+        turning = abs(w) > 0.05
+        changed = abs(v - v_prev) > 0.02 or abs(w - w_prev) > 0.10
+
+        if near or turning or changed:
+            log(Log.YELL if near else Log.GRAY, "CMD",
+                f"v={v:.2f} w={w:.2f} | L={fmt(mins['L'])} C={fmt(mins['C'])} R={fmt(mins['R'])}"
+            )
+
+        # reason labels
+        reason = ""
+        if np.isfinite(mins["C"]) and mins["C"] <= STOP_DIST:
+            reason = "STOP_DIST "
+        elif np.isfinite(mins["C"]) and mins["C"] <= SLOW_DIST:
+            reason = "SLOW_DIST "
+
+        # log when close OR turning meaningfully
+        if reason or abs(w) > 0.15:
+            log_cmd_state(v, w, mins, reason=reason)
+
+        v_prev, w_prev = v, w
+
+        log(
+            Log.GREEN,
+            "SECTOR",
+            f"L={fmt(mins['L'])}  C={fmt(mins['C'])}  R={fmt(mins['R'])} | v={v:.2f} w={w:.2f}",
+            end="\r"
+        )
+
         wl, wr = v_w_to_wheels(v, w, WHEEL_RADIUS, WHEEL_BASE)
         vel[:] = 0.0
         vel[left_i] = wl
