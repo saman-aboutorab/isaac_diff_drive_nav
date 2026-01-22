@@ -8,6 +8,8 @@ from omni.isaac.kit import SimulationApp
 # ------------------------------------------------------------
 simulation_app = SimulationApp({"headless": False})
 
+from scipy.spatial.transform import Rotation as R
+
 import omni
 import omni.replicator.core as rep
 
@@ -23,7 +25,7 @@ from isaacsim.sensors.rtx import LidarRtx
 # ------------------------------------------------------------
 # Pretty, colored logs
 # ------------------------------------------------------------
-DEBUG_SECTORS = True  # set True temporarily when debugging
+DEBUG_SECTORS = True
 
 class Log:
     RESET = "\033[0m"
@@ -74,21 +76,104 @@ def to_xyz_points(pts) -> np.ndarray | None:
     return None
 
 # ------------------------------------------------------------
-# Step 1: sector mins from point cloud
+# IMPROVED: Wider sectors + better filtering
 # ------------------------------------------------------------
 DEG = math.pi / 180.0
+
+# Wider overlapping sectors for better coverage
 SECTORS = {
-    "L": (15 * DEG, 90 * DEG),
-    "C": (-20 * DEG, 20 * DEG),
-    "R": (-90 * DEG, -15 * DEG),
+    "L": (25 * DEG, 155 * DEG),    # Wide left sector
+    "C": (-35 * DEG, 35 * DEG),    # Wider center (70°)
+    "R": (-155 * DEG, -25 * DEG),  # Wide right sector
 }
+
 MIN_VALID_RANGE = 0.15
 MAX_VALID_RANGE = 8.0
+
+def transform_points_to_robot_frame(pts_xyz, robot_orientation_quat):
+    """
+    Transform LiDAR points from sensor frame to robot base frame.
+    
+    Args:
+        pts_xyz: (N, 3) array of points in LiDAR frame
+        robot_orientation_quat: (4,) array [w, x, y, z] robot orientation
+        
+    Returns:
+        (N, 3) array of points in world/robot frame
+    """
+    if pts_xyz is None or len(pts_xyz) == 0:
+        return pts_xyz
+    
+    # Get rotation from robot orientation quaternion
+    # Assuming LiDAR is mounted aligned with robot frame
+    # If LiDAR has its own orientation, you'd need to compose rotations
+    rot = R.from_quat([
+        robot_orientation_quat[1],  # x
+        robot_orientation_quat[2],  # y
+        robot_orientation_quat[3],  # z
+        robot_orientation_quat[0]   # w (scipy uses x,y,z,w order)
+    ])
+    
+    # Apply rotation to all points
+    pts_rotated = rot.apply(pts_xyz)
+    
+    return pts_rotated
+
+
+def sector_mins_from_pointcloud_with_rotation(pts_xyz, robot_orientation, forward_axis="y"):
+    """
+    Compute sector minimums accounting for robot rotation.
+    Sectors are now defined in WORLD frame, not robot frame.
+    """
+    mins = {"L": float("inf"), "C": float("inf"), "R": float("inf")}
+
+    if pts_xyz is None or len(pts_xyz) == 0:
+        return mins
+
+    # Transform points to account for robot rotation
+    # This keeps sectors aligned with world directions
+    pts_world = transform_points_to_robot_frame(pts_xyz, robot_orientation)
+    
+    # Now use world-frame coordinates
+    if forward_axis == "x":
+        f = pts_world[:, 0]
+        l = pts_world[:, 1]
+    else:
+        f = pts_world[:, 1]
+        l = pts_world[:, 0]
+    
+    z = pts_world[:, 2]
+    
+    # Rest of your filtering logic...
+    d = np.sqrt(f*f + l*l)
+    valid = (
+        (f > -0.5) &
+        np.isfinite(d) &
+        (d > MIN_VALID_RANGE) &
+        (d < MAX_VALID_RANGE) &
+        (z > -0.40) & (z < 1.0)
+    )
+    
+    if not np.any(valid):
+        return mins
+    
+    f = f[valid]
+    l = l[valid]
+    d = d[valid]
+    
+    ang = np.arctan2(l, f)
+    
+    for k, (a0, a1) in SECTORS.items():
+        m = (ang >= a0) & (ang <= a1) if a0 <= a1 else ((ang >= a0) | (ang <= a1))
+        if np.any(m):
+            mins[k] = float(d[m].min())
+    
+    return mins
 
 def sector_mins_from_pointcloud(pts_xyz: np.ndarray, forward_axis="y"):
     """
     forward_axis: "x" or "y"
-    We assume the other horizontal axis is left/right.
+    Returns minimum distance in each sector.
     """
     mins = {"L": float("inf"), "C": float("inf"), "R": float("inf")}
 
@@ -101,22 +186,22 @@ def sector_mins_from_pointcloud(pts_xyz: np.ndarray, forward_axis="y"):
         l = pts_xyz[:, 1]  # left
     else:
         f = pts_xyz[:, 1]  # forward (your case)
-        l = pts_xyz[:, 0]  # left
+        l = -pts_xyz[:, 0]  # left
 
     z = pts_xyz[:, 2]
 
-    # --- 2D distance in the horizontal plane (forward-left plane) ---
+    # --- 2D distance in the horizontal plane ---
     d = np.sqrt(f*f + l*l)
 
-    # --- filter ---
-    # only points in front, reasonable range, and near sensor height (reduce floor/ceiling noise)
+    # --- IMPROVED FILTER: More lenient ---
     valid = (
-        (f > 0.05) &
+        (f > -0.5) &  # Allow some backward points (robot might be angled)
         np.isfinite(d) &
         (d > MIN_VALID_RANGE) &
         (d < MAX_VALID_RANGE) &
-        (z > -0.30) & (z < 0.70)          # <-- keep wall points; reduce floor/ceiling noise
+        (z > -0.40) & (z < 1.0)  # More lenient z-range
     )
+    
     if not np.any(valid):
         return mins
 
@@ -136,11 +221,9 @@ def sector_mins_from_pointcloud(pts_xyz: np.ndarray, forward_axis="y"):
         m = (ang >= a0) & (ang <= a1) if a0 <= a1 else ((ang >= a0) | (ang <= a1))
         if np.any(m):
             mins[k] = float(d[m].min())
-
-    if DEBUG_SECTORS:
-        cnt = int(np.sum(m))
-        if cnt > 0:
-            log(Log.GRAY, "SECTOR_CNT", f"{k} count={cnt} min={float(d[m].min()):.2f}")
+            if DEBUG_SECTORS:
+                cnt = int(np.sum(m))
+                log(Log.GRAY, "SECTOR_CNT", f"{k} count={cnt} min={mins[k]:.2f}")
 
     return mins
 
@@ -149,89 +232,86 @@ def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
 def compute_cmd_from_sectors(mins, w_prev=0.0):
+    """
+    IMPROVED: Better obstacle detection logic
+    """
     L, C, R = mins["L"], mins["C"], mins["R"]
     L_ok, C_ok, R_ok = np.isfinite(L), np.isfinite(C), np.isfinite(R)
 
-    # if C missing, be conservative instead of assuming clear
-    Cm = C if C_ok else SLOW_DIST
-
-    # --- speed ---
-    if Cm <= STOP_DIST:
-        v_cmd = 0.0
-    elif Cm >= SLOW_DIST:
-        v_cmd = V_MAX
+    # Find the closest obstacle in ANY direction
+    all_dists = [d for d in [L, C, R] if np.isfinite(d)]
+    closest_dist = min(all_dists) if all_dists else float("inf")
+    
+    # If center is missing, use the closest side distance (more conservative)
+    if not C_ok and all_dists:
+        Cm = min(all_dists)
     else:
-        alpha = (Cm - STOP_DIST) / (SLOW_DIST - STOP_DIST)
-        v_cmd = V_MIN + alpha * (V_MAX - V_MIN)
+        Cm = C if C_ok else float("inf")
 
-    # --- turning ---
-    # Default straight
+    # --- SPEED CONTROL ---
+    if closest_dist <= STOP_DIST:
+        v_cmd = 0.0
+    elif closest_dist <= SLOW_DIST:
+        alpha = (closest_dist - STOP_DIST) / (SLOW_DIST - STOP_DIST)
+        v_cmd = V_MIN + alpha * (V_MAX - V_MIN)
+    else:
+        v_cmd = V_MAX
+
+    # --- TURNING LOGIC ---
     w_cmd = 0.0
 
-    # If something is within "slow zone", start steering away
-    if Cm <= SLOW_DIST:
+    # If we're close to obstacles, turn away
+    if closest_dist <= SLOW_DIST:
         if L_ok and R_ok:
-            # obstacle closer on left => turn right (negative)
-            w_cmd = -TURN_GAIN * (R - L)
+            # Turn away from closer side
+            diff = R - L
+            w_cmd = -TURN_GAIN * diff
         elif R_ok and not L_ok:
-            # we only see right-side obstacles => turn LEFT
-            w_cmd = +0.7 * W_MAX
+            # Only right obstacle -> turn LEFT
+            w_cmd = +0.8 * W_MAX
         elif L_ok and not R_ok:
-            # we only see left-side obstacles => turn RIGHT
-            w_cmd = -0.7 * W_MAX
+            # Only left obstacle -> turn RIGHT
+            w_cmd = -0.8 * W_MAX
+        elif C_ok:
+            # Only center obstacle -> turn based on previous direction
+            w_cmd = -0.6 * W_MAX if w_prev >= 0 else 0.6 * W_MAX
         else:
-            w_cmd = 0.0
+            # Shouldn't happen, but keep previous turn
+            w_cmd = w_prev * 0.5
 
-        # stronger when very close
-        if Cm <= STOP_DIST:
-            w_cmd *= 1.5
+        # Boost turn when very close
+        if closest_dist <= STOP_DIST:
+            w_cmd *= 1.3
 
-    # clamp + smooth
+    # Clamp and smooth
     w_cmd = clamp(w_cmd, -W_MAX, W_MAX)
-    SMOOTH = 0.85
+    SMOOTH = 0.80
     w_cmd = SMOOTH * w_prev + (1.0 - SMOOTH) * w_cmd
 
     return float(v_cmd), float(w_cmd)
 
-def log_cmd_if_changed(v, w, v_prev, w_prev, mins):
-    dv = abs(v - v_prev)
-    dw = abs(w - w_prev)
-
-    C = mins["C"]
-    near = np.isfinite(C) and (C < SLOW_DIST)
-
-    # log if command changed meaningfully OR we are near something ahead
-    if dv > 0.03 or dw > 0.10 or near:
-        log(
-            Log.YELL if near else Log.GRAY,
-            "CMD",
-            f"v={v:.2f} w={w:.2f} | L={fmt(mins['L'])} C={fmt(mins['C'])} R={fmt(mins['R'])}"
-        )
-
 def log_cmd_state(v, w, mins, reason=""):
     color = Log.GREEN
-    C = mins.get("C", float("inf"))
-    if np.isfinite(C) and C < STOP_DIST:
+    closest = min([d for d in mins.values() if np.isfinite(d)], default=float("inf"))
+    
+    if np.isfinite(closest) and closest < STOP_DIST:
         color = Log.RED
-    elif np.isfinite(C) and C < SLOW_DIST:
+    elif np.isfinite(closest) and closest < SLOW_DIST:
         color = Log.YELL
 
     log(color, "CMD",
-        f"{reason} v={v:.2f} w={w:.2f} | L={fmt(mins['L'])} C={fmt(mins['C'])} R={fmt(mins['R'])}"
+        f"{reason} v={v:.2f} w={w:.2f} | L={fmt(mins['L'])} C={fmt(mins['C'])} R={fmt(mins['R'])} | closest={fmt(closest)}"
     )
 
 # ------------------------------------------------------------
-# Inputs / paths
+# Configuration
 # ------------------------------------------------------------
-v = 0.2
-w = 0.0
 WHEEL_RADIUS = 0.05
 WHEEL_BASE = 0.30
 
-READ_EVERY = 10              # read LiDAR every N sim steps (stability + realism)
-LOG_EVERY_READ = True        # keep light logs at read time
-LOG_GEOM_EVERY = READ_EVERY * 10
-LOG_ANGLE_EVERY = READ_EVERY * 20
+READ_EVERY = 5               # Read LiDAR more frequently
+LOG_GEOM_EVERY = READ_EVERY * 20
+LOG_ANGLE_EVERY = READ_EVERY * 30
 
 WORLD_USD = "/home/saman-aboutorab/projects/Robotics/isaac_diff_drive_nav/isaac/worlds/simple_obstacles_carter_lidar.usd"
 ROBOT_PRIM_PATH = "/World/nova_carter"
@@ -239,17 +319,16 @@ ROBOT_PATH = "/World/nova_carter"
 LIDAR_MOUNT_PATH = f"{ROBOT_PATH}/lidar_mount"
 LIDAR_SENSOR_PATH = f"{LIDAR_MOUNT_PATH}/lidar_2d"
 
-# Reactive controller params
+# Controller params - TUNED
+V_MAX = 0.20          # Slower max speed
+V_MIN = 0.03          # Slower creep
+W_MAX = 1.0           # Reduced turn speed
 
-V_MAX = 0.25          # m/s
-V_MIN = 0.05          # m/s (creep)
-W_MAX = 1.2           # rad/s (turn speed cap)
+STOP_DIST = 0.65      # Stop further away
+SLOW_DIST = 1.80      # Start slowing earlier
 
-STOP_DIST = 0.55      # if front closer than this -> strong avoid
-SLOW_DIST = 1.60      # start slowing down here
+TURN_GAIN = 0.8       # More gentle turning
 
-TURN_GAIN = 1.0       # how strongly to turn away from obstacles
-CENTER_GAIN = 0.6     # gentle centering when clear
 # ------------------------------------------------------------
 # Load world
 # ------------------------------------------------------------
@@ -284,36 +363,33 @@ vel = np.zeros(len(dof_names), dtype=np.float32)
 # ------------------------------------------------------------
 stage = get_current_stage()
 
-# Ensure mount exists
 if not stage.GetPrimAtPath(LIDAR_MOUNT_PATH).IsValid():
     create_prim(LIDAR_MOUNT_PATH, "Xform")
     xform = UsdGeom.Xformable(stage.GetPrimAtPath(LIDAR_MOUNT_PATH))
     xform.ClearXformOpOrder()
-    xform.AddTranslateOp().Set(Gf.Vec3d(0.25, 0.0, 0.25))  # front + up
+    xform.AddTranslateOp().Set(Gf.Vec3d(0.25, 0.0, 0.25))
     log(Log.MAG, "LIDAR", f"Created mount at {LIDAR_MOUNT_PATH}")
 else:
     log(Log.GRAY, "LIDAR", f"Mount already exists: {LIDAR_MOUNT_PATH}")
 
 simulation_app.update()
 
-# Create LiDAR
 lidar = LidarRtx(
     prim_path=LIDAR_SENSOR_PATH,
     translation=np.array([0.0, 0.0, 0.0]),
-    orientation=np.array([1.0, 0.0, 0.0, 0.0]),  # (w,x,y,z)
+    orientation=np.array([1.0, 0.0, 0.0, 0.0]),
     config_file_name="Example_Rotary",
-    **{"omni:sensor:Core:scanRateBaseHz": 5},
+    **{"omni:sensor:Core:scanRateBaseHz": 10},  # Higher scan rate
 )
 lidar.initialize()
 
-# Timeline must be playing for RTX/replicator annotators
 timeline = omni.timeline.get_timeline_interface()
 timeline.play()
 simulation_app.update()
 
 lidar.attach_annotator("IsaacExtractRTXSensorPointCloudNoAccumulator")
 
-# Warm up render/sensor graph
+# Warm up
 for _ in range(120):
     world.step(render=True)
 
@@ -322,20 +398,22 @@ log(Log.MAG, "LIDAR", f"RTX lidar ready at {LIDAR_SENSOR_PATH}")
 # ------------------------------------------------------------
 # Main loop
 # ------------------------------------------------------------
-last_xyz = None   # keep last valid point cloud between reads (so motion continues smoothly)
+last_xyz = None
 v_prev, w_prev = 0.0, 0.0
+
+# Initialize with safe defaults
+mins = {"L": float("inf"), "C": float("inf"), "R": float("inf")}
 
 try:
     step_i = 0
     while simulation_app.is_running():
         # ----------------------------
-        # LiDAR read (throttled)
+        # LiDAR read (more frequent)
         # ----------------------------
         if once_every(step_i, READ_EVERY):
             frame = lidar.get_current_frame()
 
             if step_i == 0:
-                # One-time: frame keys
                 if isinstance(frame, dict):
                     log(Log.CYAN, "LIDAR", f"frame keys: {list(frame.keys())}")
                 else:
@@ -347,94 +425,81 @@ try:
                 if isinstance(blob, dict):
                     pts = blob.get("data", None)
 
-            if LOG_EVERY_READ and pts is not None and once_every(step_i, READ_EVERY):
-                arr = np.asarray(pts)
-                # log format only occasionally so terminal doesn't spam
-                if step_i == 0 or once_every(step_i, READ_EVERY * 30):
-                    log(Log.CYAN, "LIDAR", f"raw pts ndim={arr.ndim}, shape={getattr(arr,'shape',None)}, size={arr.size}")
+            xyz = to_xyz_points(pts)
 
-            xyz = to_xyz_points(pts) # xyz shape: (n, 3)
-
-            if step_i == 0:
-                ang_x = np.degrees(np.arctan2(xyz[:,1], xyz[:,0]))  # assume forward=x
-                ang_y = np.degrees(np.arctan2(xyz[:,0], xyz[:,1]))  # assume forward=y
+            if step_i == 0 and xyz is not None and len(xyz) > 0:
+                ang_x = np.degrees(np.arctan2(xyz[:,1], xyz[:,0]))
+                ang_y = np.degrees(np.arctan2(xyz[:,0], xyz[:,1]))
                 log(Log.CYAN, "AXIS", f"assume fwd=x angle range: {ang_x.min():.1f}..{ang_x.max():.1f}")
                 log(Log.CYAN, "AXIS", f"assume fwd=y angle range: {ang_y.min():.1f}..{ang_y.max():.1f}")
 
             if xyz is None or len(xyz) == 0:
-                # keep last_xyz; don't overwrite good data with empty frames
                 if step_i == 0:
                     log(Log.YELL, "LIDAR", "No point cloud yet (warming up...)")
             else:
                 last_xyz = xyz
 
         # ----------------------------
-        # Step 1: sector mins (use last good data)
+        # Process LiDAR data
         # ----------------------------
-        if last_xyz is None or len(last_xyz) == 0:
-            log(Log.YELL, "LIDAR", "No RTX points yet", end="\r")
-        else:
+
+
+
+        if last_xyz is not None and len(last_xyz) > 0:
             xyz = last_xyz
 
-            # Occasional geometry sanity logs
             if once_every(step_i, LOG_GEOM_EVERY):
                 x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-                log(
-                    Log.BLUE,
-                    "LIDAR",
+                log(Log.BLUE, "LIDAR",
                     f"x:[{x.min():.2f},{x.max():.2f}]  y:[{y.min():.2f},{y.max():.2f}]  z:[{z.min():.2f},{z.max():.2f}]"
                 )
 
-            # Occasional angle sanity logs
             if once_every(step_i, LOG_ANGLE_EVERY):
                 ang_deg = np.degrees(np.arctan2(xyz[:, 0], xyz[:, 1]))
                 log(Log.GRAY, "LIDAR", f"angle deg: min={ang_deg.min():.1f}, max={ang_deg.max():.1f}")
 
             mins = sector_mins_from_pointcloud(xyz, forward_axis="y")
 
-            log(
-                Log.GREEN,
-                "SECTOR",
-                f"L={fmt(mins['L'])}  C={fmt(mins['C'])}  R={fmt(mins['R'])}",
-                end="\r"
-            )
+            # Get robot's current pose
+            # robot_position, robot_orientation = carter.get_world_pose()
 
+            # Use rotation-aware function
+            # mins = sector_mins_from_pointcloud_with_rotation(
+            #     xyz, 
+            #     robot_orientation,
+            #     forward_axis="y"
+            # )   
+                     
+        else:
+            if once_every(step_i, 30):
+                log(Log.YELL, "LIDAR", "No RTX points yet - using safe defaults")
 
         # ----------------------------
-        # Drive robot (constant v,w for now)
+        # Compute commands
         # ----------------------------
         v, w = compute_cmd_from_sectors(mins, w_prev=w_prev)
         
-        log_cmd_if_changed(v, w, v_prev, w_prev, mins)
-        near = np.isfinite(mins["C"]) and mins["C"] < SLOW_DIST
-        turning = abs(w) > 0.05
+        # Find closest obstacle for logging
+        closest = min([d for d in mins.values() if np.isfinite(d)], default=float("inf"))
+        near = np.isfinite(closest) and closest < SLOW_DIST
+        turning = abs(w) > 0.15
         changed = abs(v - v_prev) > 0.02 or abs(w - w_prev) > 0.10
 
-        if near or turning or changed:
-            log(Log.YELL if near else Log.GRAY, "CMD",
-                f"v={v:.2f} w={w:.2f} | L={fmt(mins['L'])} C={fmt(mins['C'])} R={fmt(mins['R'])}"
-            )
-
-        # reason labels
-        reason = ""
-        if np.isfinite(mins["C"]) and mins["C"] <= STOP_DIST:
-            reason = "STOP_DIST "
-        elif np.isfinite(mins["C"]) and mins["C"] <= SLOW_DIST:
-            reason = "SLOW_DIST "
-
-        # log when close OR turning meaningfully
-        if reason or abs(w) > 0.15:
+        # Log when relevant
+        if near or turning or changed or once_every(step_i, READ_EVERY * 5):
+            reason = ""
+            if np.isfinite(closest) and closest <= STOP_DIST:
+                reason = "STOP! "
+            elif np.isfinite(closest) and closest <= SLOW_DIST:
+                reason = "SLOW "
+            
             log_cmd_state(v, w, mins, reason=reason)
 
         v_prev, w_prev = v, w
 
-        log(
-            Log.GREEN,
-            "SECTOR",
-            f"L={fmt(mins['L'])}  C={fmt(mins['C'])}  R={fmt(mins['R'])} | v={v:.2f} w={w:.2f}",
-            end="\r"
-        )
-
+        # ----------------------------
+        # Drive robot
+        # ----------------------------
         wl, wr = v_w_to_wheels(v, w, WHEEL_RADIUS, WHEEL_BASE)
         vel[:] = 0.0
         vel[left_i] = wl
@@ -445,10 +510,7 @@ try:
         step_i += 1
 
 finally:
-    # Clean shutdown helps avoid syntheticdata/graph crashes
     try:
         omni.timeline.get_timeline_interface().stop()
     except Exception:
         pass
-    # If you want it to close automatically, uncomment:
-    # simulation_app.close()
