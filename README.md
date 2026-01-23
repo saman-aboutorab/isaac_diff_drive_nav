@@ -37,5 +37,9 @@ isaac_diff_drive_nav/
 
 # RUN
 /home/saman-aboutorab/isaacsim/python.sh src/main.py
+/home/saman-aboutorab/isaacsim/python.sh src/00_basic_drive.py
+/home/saman-aboutorab/isaacsim/python.sh src/20_ros2_laserscan.py
+
+
 
 

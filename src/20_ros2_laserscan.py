@@ -1,16 +1,41 @@
-import os
-import numpy as np
-
 from isaacsim import SimulationApp
 simulation_app = SimulationApp({"headless": False})
 
+import os
+import numpy as np
+
+
+import omni.kit.app
+
 import omni
 from omni.isaac.core import World
+from omni.isaac.core.utils.stage import get_current_stage
 from omni.isaac.core.utils.stage import open_stage
 from omni.isaac.core.articulations import Articulation
 from omni.isaac.core.utils.types import ArticulationAction
 from omni.isaac.core.utils.prims import is_prim_path_valid
+from pxr import Usd
 
+ext = omni.kit.app.get_app().get_extension_manager()
+
+CANDIDATES = ["isaacsim.ros2.bridge", "omni.isaac.ros2_bridge"]
+
+def enable_ext(ext_id: str) -> bool:
+    # Try enable directly (works even if already enabled; may no-op)
+    try:
+        ext.set_extension_enabled_immediate(ext_id, True)
+        return True
+    except Exception:
+        try:
+            ext.set_extension_enabled(ext_id, True)
+            return True
+        except Exception:
+            return False
+
+for name in CANDIDATES:
+    ok = enable_ext(name)
+    print(f"[ROS2] enable {name}: {ok} (enabled_now={ext.is_extension_enabled(name)})")
+    
 # -----------------------
 # Config
 # -----------------------
@@ -40,6 +65,12 @@ if not os.path.exists(WORLD_USD):
 
 log("WORLD", f"Opening: {WORLD_USD}")
 open_stage(WORLD_USD)
+
+stage = get_current_stage()
+graph_path = "/Graph/ROS_LidarRTX"
+prim = stage.GetPrimAtPath(graph_path)
+print("[WORLD] ROS lidar graph prim valid:", prim.IsValid())
+
 simulation_app.update()
 
 world = World(stage_units_in_meters=1.0)
@@ -76,6 +107,8 @@ log("ROBOT", f"Wheel indices: left={left_i} right={right_i}")
 # -----------------------
 timeline = omni.timeline.get_timeline_interface()
 timeline.play()
+for _ in range(120):
+    world.step(render=True)
 simulation_app.update()
 
 # Warm up (let physics settle)
