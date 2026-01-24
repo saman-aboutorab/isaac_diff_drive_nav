@@ -5,7 +5,6 @@ import sys
 # 0) ENV CHECK (optional but useful)
 # ---------------------------------------------------------
 # NOTE: We do NOT import rclpy here. This check is just to avoid
-# "I forgot to source ROS" confusion when ROS graph nodes are used.
 if "ROS_DISTRO" not in os.environ:
     print("\n[ERROR] ROS2 environment not found!")
     print("In a terminal run (example): source /opt/ros/jazzy/setup.bash")
@@ -93,10 +92,6 @@ log("STARTUP", f"Opening USD: {WORLD_USD}")
 open_stage(WORLD_USD)
 
 world = World(stage_units_in_meters=1.0)
-
-# Optional: only add ground plane if your USD does not already have one
-# world.scene.add_default_ground_plane()
-
 world.reset()
 
 # ---------------------------------------------------------
