@@ -1,27 +1,34 @@
 import os
-import numpy as np
+import sys
 
-# --- CHECK ENV BEFORE STARTING ---
+# ---------------------------------------------------------
+# 0) ENV CHECK (optional but useful)
+# ---------------------------------------------------------
+# NOTE: We do NOT import rclpy here. This check is just to avoid
+# "I forgot to source ROS" confusion when ROS graph nodes are used.
 if "ROS_DISTRO" not in os.environ:
     print("\n[ERROR] ROS2 environment not found!")
-    print("Please run: source /opt/ros/humble/setup.bash")
+    print("In a terminal run (example): source /opt/ros/jazzy/setup.bash")
+    print("Then launch Isaac Sim from that same terminal.")
     sys.exit(1)
 
-# 1. CONFIGURATION: Load extensions immediately
-# This ensures the Lidar nodes are recognized when the USD is opened.
+# ---------------------------------------------------------
+# 1) SIMULATION APP CONFIG (extensions must load BEFORE omni imports)
+# ---------------------------------------------------------
 CONFIG = {
     "headless": False,
     "renderer": "RayTracedLighting",
     "extensions": [
+        # ROS2 bridge + graph nodes
         "omni.isaac.ros2_bridge",
-        "omni.isaac.sensor",
+        "omni.graph.bundle.action",
+
+        # Core Isaac / nodes (often needed by graph controllers)
         "omni.isaac.core_nodes",
-        "omni.graph.bundle.action"
-    ]
+        "omni.isaac.sensor",
+    ],
 }
 
-# 2. START SIMULATION APP
-# Note: This import must happen before any omni imports
 try:
     from isaacsim import SimulationApp
 except ImportError:
@@ -30,134 +37,84 @@ except ImportError:
 simulation_app = SimulationApp(CONFIG)
 
 # ---------------------------------------------------------
-# NOW IMPORTS (Must be after SimulationApp)
+# 2) IMPORTS (after SimulationApp!)
 # ---------------------------------------------------------
+import omni
 import omni.timeline
-from omni.isaac.core import World
-from omni.isaac.core.utils.stage import open_stage, get_current_stage
-from omni.isaac.core.articulations import Articulation
-from omni.isaac.core.utils.types import ArticulationAction
-from omni.isaac.core.utils.prims import is_prim_path_valid
-
-# ---------------------------------------------------------
-# FORCE ENABLE EXTENSIONS
-# ---------------------------------------------------------
 import omni.kit.app
+
+from omni.isaac.core import World
+from omni.isaac.core.utils.stage import open_stage
 from omni.isaac.core.utils.extensions import enable_extension
 
-# Explicitly force the bridge on
-print("[STARTUP] Enabling ROS2 Bridge...")
-enable_extension("omni.isaac.ros2_bridge")
-
-# Wait one update frame to let the extension system register it
-simulation_app.update()
-
-# CHECK AGAIN
-ext_manager = omni.kit.app.get_app().get_extension_manager()
-if not ext_manager.is_extension_enabled("omni.isaac.ros2_bridge"):
-    print("\n[FATAL] ROS2 Bridge failed to load even after force-enable.")
-    print("Check looking at the terminal logs above for 'librclpy.so not found' or similar errors.")
-    simulation_app.close()
-    sys.exit(1)
-else:
-    print("[SUCCESS] ROS2 Bridge is ACTIVE.")
-
 # ---------------------------------------------------------
-# CONSTANTS
+# 3) CONSTANTS
 # ---------------------------------------------------------
-# Update this path to your exact file location
 WORLD_USD = "/home/saman-aboutorab/projects/Robotics/isaac_diff_drive_nav/isaac/worlds/simple_obstacles_carter_lidar.usd"
-ROBOT_PRIM_PATH = "/World/nova_carter"
-ACTION_GRAPH_PATH = "/Graph/ROS_LidarRTX" # Check your USD for the exact name
 
-LEFT_WHEEL_DOF  = "joint_wheel_left"
-RIGHT_WHEEL_DOF = "joint_wheel_right"
-LEFT_WHEEL_VEL  = 4.0 
-RIGHT_WHEEL_VEL = 4.0
+Wheel_Distance = 0.413
+Wheel_Radius = 0.14
+
+# If you want, just for sanity checks/logging (not required):
+ACTION_GRAPH_PATH = "/Graph/ROS_LidarRTX"  # update if your graph path is different
 
 def log(tag, msg):
     print(f"[{tag}] {msg}")
 
 # ---------------------------------------------------------
-# SETUP WORLD
+# 4) FORCE ENABLE EXTENSIONS (extra safety)
+# ---------------------------------------------------------
+log("STARTUP", "Enabling ROS2 Bridge extension...")
+enable_extension("omni.isaac.ros2_bridge")
+enable_extension("omni.graph.bundle.action")
+enable_extension("omni.isaac.core_nodes")
+enable_extension("omni.isaac.sensor")
+
+# Tick one frame so extension manager registers everything
+simulation_app.update()
+
+ext_manager = omni.kit.app.get_app().get_extension_manager()
+ros_ok = ext_manager.is_extension_enabled("omni.isaac.ros2_bridge")
+log("CHECK", f"ROS2 Bridge Enabled: {ros_ok}")
+
+if not ros_ok:
+    log("FATAL", "ROS2 Bridge did not enable. Check terminal logs for missing rclpy/libraries.")
+    simulation_app.close()
+    sys.exit(1)
+
+# ---------------------------------------------------------
+# 5) LOAD STAGE + WORLD
 # ---------------------------------------------------------
 if not os.path.exists(WORLD_USD):
     simulation_app.close()
-    raise FileNotFoundError(f"Could not find USD: {WORLD_USD}")
+    raise FileNotFoundError(f"USD not found: {WORLD_USD}")
 
-log("STARTUP", "Loading Stage...")
+log("STARTUP", f"Opening USD: {WORLD_USD}")
 open_stage(WORLD_USD)
 
-# Verify extensions are active
-ext_manager = omni.kit.app.get_app().get_extension_manager()
-ros_enabled = ext_manager.is_extension_enabled("omni.isaac.ros2_bridge")
-sensor_enabled = ext_manager.is_extension_enabled("omni.isaac.sensor")
-log("CHECK", f"ROS2 Bridge Enabled: {ros_enabled}")
-log("CHECK", f"Isaac Sensor Enabled: {sensor_enabled}")
-
-# Initialize World
 world = World(stage_units_in_meters=1.0)
-world.scene.add_default_ground_plane() # Optional, if your USD doesn't have one
 
-# ---------------------------------------------------------
-# SETUP ROBOT
-# ---------------------------------------------------------
-if not is_prim_path_valid(ROBOT_PRIM_PATH):
-    simulation_app.close()
-    raise RuntimeError(f"Robot prim not found at: {ROBOT_PRIM_PATH}")
+# Optional: only add ground plane if your USD does not already have one
+# world.scene.add_default_ground_plane()
 
-carter = Articulation(prim_path=ROBOT_PRIM_PATH, name="nova_carter")
-world.scene.add(carter)
-
-# Resetting the world allows the Articulation to register
 world.reset()
 
-# Locate Joints
-dof_names = carter.dof_names
-log("ROBOT", f"DOFs found: {dof_names}")
-
-try:
-    left_i = dof_names.index(LEFT_WHEEL_DOF)
-    right_i = dof_names.index(RIGHT_WHEEL_DOF)
-except ValueError as e:
-    simulation_app.close()
-    raise ValueError(f"Could not find wheel joints. Check names in USD. {e}")
-
 # ---------------------------------------------------------
-# EXECUTION LOOP
+# 6) RUN LOOP (timeline must be playing for Action Graph)
 # ---------------------------------------------------------
-log("SIM", "Starting Simulation loop...")
 timeline = omni.timeline.get_timeline_interface()
-timeline.play() # CRITICAL: Action Graphs require the timeline to be playing
-
-# Tick once to ensure graphs initialize
-world.step(render=True) 
-
-vel = np.zeros(len(dof_names), dtype=np.float32)
+timeline.play()
+log("SIM", "Timeline started. Action Graph should now run.")
 
 try:
-    step_count = 0
     while simulation_app.is_running():
-        
-        # Apply velocity
-        vel[:] = 0.0
-        vel[left_i] = LEFT_WHEEL_VEL
-        vel[right_i] = RIGHT_WHEEL_VEL
-        carter.apply_action(ArticulationAction(joint_velocities=vel))
-
-        # Step the physics and rendering
+        # Step physics/render. Action Graph evaluates while timeline is playing.
         world.step(render=True)
-        
-        # Debug helper: Verify ROS bridge is actually ticking occasionally
-        if step_count % 60 == 0:
-            # You can check 'ros2 topic list' in a separate terminal now
-            pass
-            
-        step_count += 1
 
 except KeyboardInterrupt:
-    log("SIM", "Stopping...")
+    log("SIM", "KeyboardInterrupt - stopping")
 
 finally:
     timeline.stop()
     simulation_app.close()
+    log("SIM", "Closed cleanly.")
