@@ -40,6 +40,12 @@ isaac_diff_drive_nav/
 /home/saman-aboutorab/isaacsim/python.sh src/00_basic_drive.py
 /home/saman-aboutorab/isaacsim/python.sh src/20_ros2_laserscan.py
 
+# ROS2 Topics
+source /opt/ros/jazzy/setup.bash
+ros2 topic list
+
+# ROS2 Command
+ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.3}, angular: {z: 0.0}}" 
 
 
 
