@@ -1,6 +1,6 @@
 # Isaac Sim SLAM Integration Attempt
 
-**Branch:** `feature/ros2-laserscan`
+**Branch:** `archive/isaac-slam-nav2-attempt`
 **Status:** ⚠️ 95% Complete - Blocked by Isaac Sim Transform Tree Issue
 **Date:** February 2026
 
