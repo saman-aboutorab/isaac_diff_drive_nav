@@ -9,7 +9,7 @@
 ```
 main (stable demos)
 │
-├── feature/ros2-laserscan ✅ COMPLETE
+├── archive/isaac-slam-nav2-attempt ✅ COMPLETE
 │   └── "Learning Experience" - Documented failed attempt
 │       - Shows debugging skills
 │       - Shows problem-solving process
@@ -120,7 +120,7 @@ isaac_diff_drive_nav/
 
 **Key Result:** Robot makes navigation decisions based on visual input
 
-#### Bonus: Learning from Failure (feature/ros2-laserscan)
+#### Bonus: Learning from Failure (archive/isaac-slam-nav2-attempt)
 **"Problem-Solving & Debugging"**
 
 **What I Attempted:**
@@ -182,13 +182,13 @@ Two complementary demonstrations of mobile robot autonomy:
 - Well-commented code
 - Clear commit messages
 - Technical decisions documented
-- Learning process visible (feature/ros2-laserscan)
+- Learning process visible (archive/isaac-slam-nav2-attempt)
 
 ## Timeline
 
 | Branch | Status | Time Required | Priority |
 |--------|--------|---------------|----------|
-| ros2-laserscan | ✅ Complete | - | Archive |
+| archive/isaac-slam-nav2-attempt | ✅ Complete | - | Archive |
 | slam-gazebo | 🚧 In Progress | 2-3 hours | **HIGH** |
 | isaac-cv | 📋 Planned | 2-3 hours | Medium |
 | main | 📝 Documentation | 1 hour | After demos |
