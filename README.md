@@ -35,6 +35,37 @@ isaac_diff_drive_nav/
 ├── README.md
 └── requirements.txt
 
+🗄️ archive/isaac-slam-nav2-attempt (Completed - Archived)
+The Learning Experience
+
+Attempted to integrate Isaac Sim with SLAM Toolbox for autonomous navigation
+Got 95% working: LiDAR scans, ROS2 bridge, SLAM node configuration
+Blocker: Isaac Sim's Transform Tree doesn't publish dynamic robot position
+Value: Demonstrates 8+ hours of systematic debugging, problem-solving skills, and knowing when to pivot
+All work documented in DEBUGGING_LOG.md and README_ISAAC_SLAM_ATTEMPT.md
+
+🎯 feature/slam-gazebo (In Progress - HIGH PRIORITY)
+Demo 1: Classical SLAM & Navigation
+
+Uses Gazebo simulator with Turtlebot3 (reliable TF system)
+Reuses all the SLAM/Nav2 configurations from the archived attempt
+Goal: Working demo of real-time map building + autonomous navigation
+Resume value: Industry-standard robotics demo showing ROS2, SLAM, path planning skills
+Status: Ready to implement (2-3 hours estimated)
+
+🤖 feature/isaac-cv (Planned)
+Demo 2: Computer Vision Navigation
+
+Keeps Isaac Sim (leverage its strengths: photorealistic rendering, synthetic data)
+Pivots from SLAM to vision-based navigation
+Adds camera + object detection (YOLO) for navigation decisions
+Goal: Robot makes decisions based on visual input (approach objects, avoid others)
+Resume value: Shows modern AI/ML skills, synthetic data generation for training
+Status: Planned after slam-gazebo demo (2-3 hours estimated)
+
+📊 main
+Clean, polished branch with README linking to both working demos and the documented learning experience.
+
 # RUN
 /home/saman-aboutorab/isaacsim/python.sh src/main.py
 /home/saman-aboutorab/isaacsim/python.sh src/00_basic_drive.py
