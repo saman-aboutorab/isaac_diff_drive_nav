@@ -43,9 +43,34 @@ isaac_diff_drive_nav/
 # ROS2 Topics
 source /opt/ros/jazzy/setup.bash
 ros2 topic list
+ros2 topic hz /scan
+ros2 topic echo /scan --once
+ros2 topic hz /cmd_vel
+ros2 topic echo /cmd_vel
+ros2 topic echo /tf --once
 
-# ROS2 Command
+# ROS2 cmd_vel manual
 ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.3}, angular: {z: 0.0}}" 
+
+# Before running the package
+cd ~/projects/Robotics/isaac_diff_drive_nav/ros2_ws
+source install/setup.bash
+source /opt/ros/jazzy/setup.bash
+
+# ROS2 nodes
+ros2 run reactive_nav gap_follower
+ros2 run reactive_nav scan_sanitizer
+ros2 launch isaac_nav_bringup isaac_slam_nav.launch.py
+
+#ROS2 updates on the node
+cd ~/projects/Robotics/isaac_diff_drive_nav/ros2_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install
+source install/setup.bash
+
+#Rviz2
+rviz2
+ros2 param set /rviz use_sim_time true
 
 
 

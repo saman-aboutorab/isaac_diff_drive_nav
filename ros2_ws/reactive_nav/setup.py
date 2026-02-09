@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-		'gap_follower = reactive_nav.gap_follower:main',
+		'gap_follower = reactive_nav.gap_follower:main',    
         'scan_sanitizer = reactive_nav.scan_sanitizer:main',
         ],
     },
