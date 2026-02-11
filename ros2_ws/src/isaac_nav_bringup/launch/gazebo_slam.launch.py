@@ -57,8 +57,8 @@ def generate_launch_description():
         ),
         launch_arguments={
             'use_sim_time': use_sim_time,
-            'x_pose': '0.0',
-            'y_pose': '0.0'
+            'x_pose': '0.5',
+            'y_pose': '0.5'
         }.items()
     )
 
