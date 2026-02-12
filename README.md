@@ -1,41 +1,32 @@
-# Project Title (Isaac Sim + Python)
-Isaac Differential Drive Navigation
+# Isaac Sim Differential Drive Navigation
 
-## Goal
-Built a physics-accurate mobile robot navigation system in NVIDIA Isaac Sim, implementing differential-drive kinematics, LiDAR-based obstacle avoidance, and PID wheel control with sensor noise modeling; validated behavior across randomized cluttered environments.
+Built a physics-accurate mobile robot navigation system in NVIDIA Isaac Sim, implementing differential-drive kinematics, LiDAR-based obstacle avoidance, and ROS2 integration.
+
+> **Note:** The Gazebo-based SLAM, Nav2, and vision navigation work has moved to a dedicated repo:
+> [gazebo_robot_nav](https://github.com/saman-aboutorab/gazebo_robot_nav)
 
 ## Tech Stack
+
 - NVIDIA Isaac Sim
 - Python
-- ROS2
+- ROS2 Jazzy
 
-## Project Structure
-isaac_diff_drive_nav/
-├── src/
-│   ├── main.py
-│   ├── nodes/
-│   │   └── nav_demo.py
-│   ├── robot/
-│   │   └── diff_drive.py
-│   ├── control/
-│   │   └── avoidance.py
-│   ├── sensors/
-│   │   └── lidar.py
-│   └── utils/
-│       └── config.py
-│
-├── isaac/
-│   ├── worlds/
-│   │   └── simple_obstacles.usd
-│   ├── robots/
-│   │   └── diff_bot.usd
-│   └── configs/
-│       └── nav.yaml
-│
-├── README.md
-└── requirements.txt
+## Branches
 
-# RUN
-/home/saman-aboutorab/isaacsim/python.sh src/main.py
+### `main` — Baseline Isaac Sim Drive
+Core differential drive robot with LiDAR-based obstacle avoidance in Isaac Sim.
 
+### `features/rtx-lidar-pointcloud` — RTX LiDAR Pipeline
+RTX-accelerated LiDAR pointcloud processing, wall-following math, and velocity control based on sensor readings.
 
+### `archive/isaac-slam-nav2-attempt` — SLAM Integration (Archived)
+Attempted full SLAM Toolbox + Nav2 integration with Isaac Sim. Got 95% working (LiDAR scans, ROS2 bridge, SLAM node config). Blocked by Isaac Sim's Transform Tree not publishing dynamic robot positions. Documented extensively in `DEBUGGING_LOG.md` and `README_ISAAC_SLAM_ATTEMPT.md`.
+
+### `feature/isaac-cv` — Computer Vision Navigation (Planned)
+Roadmap for vision-based navigation using Isaac Sim's photorealistic rendering and synthetic data generation with YOLO object detection.
+
+## Run
+
+```bash
+/home/saman-aboutorab/isaacsim/python.sh src/00_basic_drive.py
+```
